@@ -1,0 +1,222 @@
+services:
+  # ============================================
+  # ZOOKEEPER - Coordinación de Kafka Cluster
+  # ============================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: netsentinel-zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - netsentinel-network
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+
+  # ============================================
+  # KAFKA - Message Broker para Streaming
+  # ============================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: netsentinel-kafka
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      
+      # Listeners: INTERNAL para comunicación entre contenedores, EXTERNAL para host
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9093,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      
+      # Configuración de tópicos
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      
+      # Performance tuning
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 días
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1GB
+      KAFKA_COMPRESSION_TYPE: snappy
+      
+      # Offsets y consumer groups
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - netsentinel-network
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  # ============================================
+  # KAFDROP - Web UI para Kafka (Debugging)
+  # ============================================
+  kafdrop:
+    image: obsidiandynamics/kafdrop:4.0.1
+    container_name: netsentinel-kafdrop
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9093
+      JVM_OPTS: "-Xms128M -Xmx256M"
+      SERVER_SERVLET_CONTEXTPATH: "/"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - netsentinel-network
+
+  # ============================================
+  # MONGODB - Base de Datos NoSQL
+  # ============================================
+  mongodb:
+    image: mongo:7.0
+    container_name: netsentinel-mongodb
+    hostname: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-netsentinel2025}
+      MONGO_INITDB_DATABASE: netsentinel
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - netsentinel-network
+    volumes:
+      - mongodb-data:/data/db
+      - mongodb-config:/data/configdb
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+
+  # ============================================
+  # REDIS - Cache y Message Broker
+  # ============================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: netsentinel-redis
+    hostname: redis
+    ports:
+      - "6380:6379"  # Puerto 6380 en host, 6379 en container
+    command: >
+      redis-server 
+      --appendonly yes 
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-netsentinel2025}
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - netsentinel-network
+    volumes:
+      - redis-data:/data
+
+  # ============================================
+  # INGESTOR SERVICE - FastAPI (Placeholder)
+  # ============================================
+  # ingestor:
+  #   build:
+  #     context: ./services/ingestor
+  #     dockerfile: ../../docker/Dockerfile.python
+  #   container_name: netsentinel-ingestor
+  #   ports:
+  #     - "8001:8000"
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+  #     KAFKA_TOPIC_LOGS: logs-topic
+  #     SERVICE_NAME: ingestor
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #   networks:
+  #     - netsentinel-network
+  #   command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ============================================
+  # PROCESSOR SERVICE - Python Worker (Placeholder)
+  # ============================================
+  # processor:
+  #   build:
+  #     context: ./services/processor
+  #     dockerfile: ../../docker/Dockerfile.python
+  #   container_name: netsentinel-processor
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+  #     KAFKA_TOPIC_LOGS: logs-topic
+  #     KAFKA_TOPIC_ALERTS: alerts-topic
+  #     KAFKA_GROUP_ID: processor-group
+  #     MONGO_URI: mongodb://admin:netsentinel2025@mongodb:27017
+  #     REDIS_HOST: redis
+  #     REDIS_PASSWORD: netsentinel2025
+  #     SERVICE_NAME: processor
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     mongodb:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - netsentinel-network
+  #   command: python -u main.py
+
+# ============================================
+# NETWORKS
+# ============================================
+networks:
+  netsentinel-network:
+    driver: bridge
+    name: netsentinel-network
+
+# ============================================
+# VOLUMES - Persistencia de Datos
+# ============================================
+volumes:
+  zookeeper-data:
+    name: netsentinel-zookeeper-data
+  zookeeper-logs:
+    name: netsentinel-zookeeper-logs
+  kafka-data:
+    name: netsentinel-kafka-data
+  mongodb-data:
+    name: netsentinel-mongodb-data
+  mongodb-config:
+    name: netsentinel-mongodb-config
+  redis-data:
+    name: netsentinel-redis-data

@@ -1,0 +1,77 @@
+# ============================================
+# STAGE 1: Builder - Instalación de dependencias
+# ============================================
+FROM python:3.11-slim AS builder
+
+# Metadatos
+LABEL maintainer="DevSecOps-Portfolio-2025"
+LABEL description="Python 3.11 Slim base image for NetSentinel SIEM microservices"
+
+# Variables de entorno para optimización de Python
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=100
+
+# Instalar dependencias del sistema necesarias para compilación
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Crear directorio de trabajo
+WORKDIR /app
+
+# Copiar solo requirements primero (cache layer optimization)
+COPY requirements.txt .
+
+# Instalar dependencias de Python en virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt
+
+# ============================================
+# STAGE 2: Runtime - Imagen final optimizada
+# ============================================
+FROM python:3.11-slim
+
+# Variables de entorno
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    SERVICE_NAME="netsentinel-service"
+
+# Instalar dependencias runtime mínimas
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Crear usuario no-root para seguridad
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
+
+# Copiar virtual environment desde builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Crear directorio de aplicación
+WORKDIR /app
+
+# Copiar código de la aplicación
+COPY --chown=appuser:appuser . .
+
+# Cambiar a usuario no-root
+USER appuser
+
+# Health check genérico (override en docker-compose si es necesario)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Exponer puerto por defecto (FastAPI/HTTP)
+EXPOSE 8000
+
+# Comando por defecto (override en docker-compose)
+CMD ["python", "-u", "main.py"]
